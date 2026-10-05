@@ -148,12 +148,24 @@ async function togglePane($: Engine, term?: number): Promise<string> {
 
 const TAB_ARGS: Record<string, DeckTab> = { plan: 'plan', context: 'plan', changes: 'changes', files: 'changes', agents: 'agents' }
 
+// The dock is shared by every pane in it, so a pane asks for its width again each time its tab comes to the
+// front: switching tabs moves the dock between widths. A width the person drags still wins until then.
+let termCols = 0
+let wasShown = false
+async function watchTab($: EngineInterface) {
+  const me = (await $.ui.panes().catch(() => [])).find(p => p.id === PANE)
+  const shownNow = !!me?.isShown
+  if (shownNow && !wasShown && termCols > 0) void $.ui.open(openArgs(termCols))
+  wasShown = shownNow
+}
+
 export const register: Register = (on, options) => {
   const showPet = options.pet !== false
   const pct = Number(options.widthPercent)
   share = Number.isFinite(pct) && pct >= 10 && pct <= 80 ? pct / 100 : 0.3
 
   on('session.start', async ($, e, next) => {
+    $.clock.every(800, () => { void watchTab($) })
     await $.command.register({ name: 'deck', description: 'Toggle the deck pane: plan, context, changes, subagents', argumentHint: 'plan|changes|agents' })
     $.clock.every(350, () => {
       frame++
@@ -334,6 +346,7 @@ export const register: Register = (on, options) => {
     // Opened at session start the dock takes its default share; once the terminal's width is known
     // (or changes), ask once for our share of it. The viewport is the whole terminal when wider than the body.
     const term = e.viewport?.columns
+    if (term && body && term > body + 4) termCols = term
     if (term && body && term > body + 4 && term !== lastTerm) {
       lastTerm = term
       const want = Math.max(MIN_COLS, Math.round(term * share))
