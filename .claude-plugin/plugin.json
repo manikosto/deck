@@ -1,0 +1,26 @@
+{
+  "name": "deck",
+  "version": "0.1.0",
+  "description": "A side pane for Claude Code: plan, context breakdown and history, changed files, subagents, usage hearts and a pixel robot that acts out what Claude is doing",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "autoOpen": {
+      "type": "boolean",
+      "title": "Open on start",
+      "description": "Dock the deck pane when a session starts (needs a wide fullscreen terminal)",
+      "default": true
+    },
+    "pet": {
+      "type": "boolean",
+      "title": "Pixel robot",
+      "description": "Show the robot in the status box",
+      "default": true
+    },
+    "widthPercent": {
+      "type": "number",
+      "title": "Pane width (%)",
+      "description": "Share of the terminal the docked pane asks for, 10 to 80",
+      "default": 30
+    }
+  }
+}

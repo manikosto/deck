@@ -1,0 +1,20 @@
+{
+  "name": "deck",
+  "owner": {
+    "name": "manikosto",
+    "url": "https://github.com/manikosto"
+  },
+  "description": "A side pane for Claude Code: plan, context breakdown and history, changed files, subagents, usage hearts and a pixel robot that acts out what Claude is doing",
+  "plugins": [
+    {
+      "name": "deck",
+      "description": "A side pane for Claude Code: plan, context breakdown and history, changed files, subagents, usage hearts and a pixel robot that acts out what Claude is doing",
+      "source": "./",
+      "category": "productivity",
+      "tags": [
+        "mod",
+        "pane"
+      ]
+    }
+  ]
+}
