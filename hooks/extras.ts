@@ -83,7 +83,7 @@ export function phrase(mood: Mood, at: number): string {
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
-// A git diff (or a whole new file) as a dark HTML page the preview pane can show.
+// A git diff (or a whole new file) as a dark HTML page the browser opens.
 export function diffHtml(title: string, diff: string, isWholeFile: boolean): string {
   const rows = diff.split('\n').map(line => {
     const cls = isWholeFile ? 'add' : line.startsWith('+++') || line.startsWith('---') ? 'meta' : line.startsWith('@@') ? 'hunk' : line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : line.startsWith('diff ') || line.startsWith('index ') ? 'meta' : ''

@@ -1,4 +1,4 @@
-export type DeckTab = 'changes' | 'agents' | 'plan'
+export type DeckTab = 'changes' | 'agents' | 'plan' | 'global'
 
 export type DeckPlanItem = {
   id: string
@@ -40,6 +40,22 @@ export type DeckFeedItem = { kind: DeckActKind; text: string; at: number; ok?: b
 // The turn in progress (startedAt set) or the last one: how long, how many tool calls, and a loop if one showed.
 export type DeckTurn = { startedAt?: number; tools: number; lastMs?: number; lastTools?: number; loop?: string }
 
+// A Claude Code background session, as `claude agents --json --all` lists it, with what it waits for.
+export type DeckSession = {
+  id: string
+  sessionId: string
+  // a process of its own runs it now: open it in a new window, never resume it here
+  live: boolean
+  name: string
+  state: string
+  needs?: string
+  cwd: string
+  at: number
+}
+
+// Where ← back returns to after jumping into another session here.
+export type DeckBack = { sessionId: string; name: string }
+
 export type DeckInfo = { model?: string; branch?: string; dirty?: number }
 
 export type DeckFile = { path: string; edits: number; isNew: boolean; at: number }
@@ -69,6 +85,8 @@ declare module 'claude-code' {
       agents: DeckAgent[]
       info: DeckInfo
       feed: DeckFeedItem[]
+      sessions: DeckSession[]
+      back: DeckBack | null
       turn: DeckTurn
     }
   }

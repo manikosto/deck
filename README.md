@@ -8,7 +8,7 @@ A side pane for Claude Code, modelled on the pane in [glowup](https://github.com
 - **Recent**: a feed of what happened — files edited, commands run, tests passed or failed, subagents finished, turns done.
 - **Turn timer**: elapsed time and tool calls of the turn in progress, a warning when the same call repeats three times (a loop).
 - **Context pulse**: a bar per turn of how many tokens it added, and a warning (plus a toast) when auto-compact is three turns away.
-- **Changes**: click a file to see its git diff (or the whole new file) in the preview pane.
+- **Changes**: click a file to see its git diff (or the whole new file) in your browser.
 - **Limit alarm**: under 15% of the tighter limit the hearts blink and a toast says so, once per window.
 - **Status box**: the current action, hearts for the tighter of the 5-hour and weekly limits (or cost on an API key), and Bolt, a pixel robot with a speech bubble: he works, thinks, dances when tests pass, cries when they fail, and falls asleep after two quiet minutes. The status box also shows the model, git branch, both limits with their reset times, and the session's cost.
 
@@ -25,7 +25,7 @@ claude plugin marketplace add manikosto/deck
 claude plugin install deck@deck
 ```
 
-Needs Claude Code 2.1.289 or later. Clicking a changed file opens its diff in the [preview](https://github.com/manikosto/preview) pane when that mod is installed.
+Needs Claude Code 2.1.289 or later. Clicking a changed file opens its diff in your browser.
 
 Checks: `claude plugin validate .` and `claude plugin test .`.
 

@@ -1,6 +1,6 @@
 {
   "name": "deck",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "A side pane for Claude Code: plan, context breakdown and history, changed files, subagents, usage hearts and a pixel robot that acts out what Claude is doing",
   "types": "./types/index.d.ts",
   "userConfig": {

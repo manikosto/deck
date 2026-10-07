@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import type { DeckAct, DeckAgent, DeckCtx, DeckFeedItem, DeckFile, DeckHistory, DeckInfo, DeckPlanItem, DeckTab, DeckTurn, DeckUsage } from '../types'
+import type { DeckAct, DeckAgent, DeckCtx, DeckFeedItem, DeckFile, DeckHistory, DeckInfo, DeckBack, DeckPlanItem, DeckSession, DeckTab, DeckTurn, DeckUsage } from '../types'
 import { actOf, ago, applyTaskUpdate, cacheHit, fmtK, growthPerTurn, heaviest, planFromTodos, prettyModel, turnsLeft } from './model.ts'
 import { ALARM_LEFT, SLEEP_AFTER_MS, callSig, diffHtml, feedItem, isTestCommand, loopOf, pushFeed, testOutcome, tightest } from './extras.ts'
 import { moodOf, petCells } from './pet.ts'
@@ -26,6 +26,8 @@ const agents = atom({ plugin: 'deck', key: 'agents' } as const, [] as DeckAgent[
 const info = atom({ plugin: 'deck', key: 'info' } as const, {} as DeckInfo)
 const feed = atom({ plugin: 'deck', key: 'feed' } as const, [] as DeckFeedItem[])
 const turn = atom({ plugin: 'deck', key: 'turn' } as const, { tools: 0 } as DeckTurn)
+const sessions = atom({ plugin: 'deck', key: 'sessions' } as const, [] as DeckSession[])
+const back = atom({ plugin: 'deck', key: 'back' } as const, null as DeckBack | null)
 
 type Engine = EngineInterface
 
@@ -53,6 +55,107 @@ async function setAct($: Engine, next: DeckAct) {
   await update($, act, () => next)
 }
 
+// ---- every Claude Code background session ----------------------------------
+
+let home = ''
+let termProgram = ''
+let sessionsBusy = false
+
+// `claude agents --json --all` is the list the agent view shows; each background session's job folder
+// says what it waits for and when it last moved, and ~/.claude/sessions says which have a live process.
+async function liveSessionIds($: Engine): Promise<Set<string>> {
+  const dir = `${home}/.claude/sessions`
+  const bySid = new Map<string, string>()
+  try {
+    for (const en of await $.fs.list(dir)) {
+      if (!en.name.endsWith('.json')) continue
+      try {
+        const j = JSON.parse(await $.fs.read(`${dir}/${en.name}`)) as { pid?: unknown; sessionId?: unknown }
+        if (typeof j.pid === 'number' && typeof j.sessionId === 'string') bySid.set(String(j.pid), j.sessionId)
+      } catch {}
+    }
+    if (!bySid.size) return new Set()
+    const r = await $.process.run(['ps', '-o', 'pid=', '-p', [...bySid.keys()].join(',')], { timeoutMs: 5000 })
+    return new Set(r.stdout.split('\n').map(x => x.trim()).filter(Boolean).map(pid => bySid.get(pid)!).filter(Boolean))
+  } catch {
+    return new Set()
+  }
+}
+
+async function refreshSessions($: Engine) {
+  if (sessionsBusy) return
+  sessionsBusy = true
+  try {
+    const [r, live, current] = await Promise.all([
+      $.process.run(['claude', 'agents', '--json', '--all'], { timeoutMs: 15000 }),
+      liveSessionIds($),
+      $.session.id().catch(() => ''),
+    ])
+    if (r.exitCode !== 0) return
+    const raw = JSON.parse(r.stdout) as { id?: string; sessionId?: string; name?: string; state?: string; kind?: string; cwd?: string; startedAt?: number }[]
+    const bg = raw.filter(x => x.kind === 'background' && typeof x.id === 'string' && /^[0-9a-f]{6,16}$/.test(x.id) && x.sessionId !== current)
+    const out: DeckSession[] = await Promise.all(bg.map(async x => {
+      const dir = `${home}/.claude/jobs/${x.id}`
+      let needs: string | undefined
+      let at = x.startedAt ?? 0
+      try {
+        const st = JSON.parse(await $.fs.read(`${dir}/state.json`)) as { needs?: unknown; detail?: unknown }
+        const text = typeof st.needs === 'string' && st.needs ? st.needs : typeof st.detail === 'string' ? st.detail : ''
+        if (text) needs = text.replace(/\s+/g, ' ').trim()
+      } catch {}
+      try { at = Math.max(at, (await $.fs.stat(`${dir}/timeline.jsonl`)).mtimeMs) } catch {}
+      const sessionId = x.sessionId ?? ''
+      return { id: x.id!, sessionId, live: live.has(sessionId), name: x.name || x.id!, state: x.state ?? 'idle', cwd: x.cwd ?? '', at, ...(needs ? { needs } : {}) }
+    }))
+    out.sort((a, b) => b.at - a.at)
+    await update($, sessions, () => out.slice(0, 60))
+  } catch {} finally {
+    sessionsBusy = false
+  }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+// A session with no process of its own opens right here (/resume), and ← back returns; one that runs
+// elsewhere opens in a new terminal window (claude attach), since two processes must not share a session.
+async function openSession($: Engine, s: DeckSession) {
+  if (!/^[0-9a-f]{6,16}$/.test(s.id)) return
+  if (!s.live && UUID.test(s.sessionId)) {
+    const current = await $.session.id().catch(() => '')
+    const name = 'previous session'
+    if (current && current !== s.sessionId) {
+      const b: DeckBack = { sessionId: current, name }
+      await $.store.set('back', b)
+      await update($, back, () => b)
+    }
+    try {
+      await $.command.run({ command: 'resume', args: s.sessionId })
+      return
+    } catch (err) {
+      $.ui.toast(`Could not switch here (${err instanceof Error ? err.message : String(err)}); opening a new window`)
+    }
+  }
+  const cmd = `claude attach ${s.id}`
+  try {
+    if (/ghostty/i.test(termProgram)) await $.process.run(['open', '-na', 'Ghostty', '--args', '-e', 'claude', 'attach', s.id])
+    else if (/iterm/i.test(termProgram)) await $.process.run(['osascript', '-e', `tell application "iTerm" to create window with default profile command ${JSON.stringify(cmd)}`])
+    else await $.process.run(['osascript', '-e', 'tell application "Terminal"', '-e', 'activate', '-e', `do script ${JSON.stringify(cmd)}`, '-e', 'end tell'])
+    $.ui.toast(`“${s.name.slice(0, 40)}” runs elsewhere: opened it in a new window`)
+  } catch (err) {
+    $.ui.toast(`Could not open it: ${err instanceof Error ? err.message : String(err)}. Run: ${cmd}`)
+  }
+}
+
+async function goBack($: Engine) {
+  const b = await read($, back)
+  if (!b || !UUID.test(b.sessionId)) return
+  await $.store.delete('back')
+  await update($, back, () => null)
+  try { await $.command.run({ command: 'resume', args: b.sessionId }) } catch (err) {
+    $.ui.toast(`Could not go back: ${err instanceof Error ? err.message : String(err)}. Run: /resume ${b.sessionId}`)
+  }
+}
+
 async function log($: Engine, item: DeckFeedItem) {
   await update($, feed, list => pushFeed(list, item))
 }
@@ -67,7 +170,7 @@ async function checkLimits($: Engine, limits: DeckUsage['limits']) {
   }
 }
 
-// A file's changes as a page in the preview pane: its git diff, or the whole file when git has nothing to say.
+// A file's changes as a page in the browser: its git diff, or the whole file when git has nothing to say.
 async function openDiff($: Engine, path: string) {
   const dir = path.slice(0, path.lastIndexOf('/')) || '/'
   const name = path.split('/').pop() ?? path
@@ -81,11 +184,7 @@ async function openDiff($: Engine, path: string) {
   }
   const out = `${tmp}/deck-diff-${name.replace(/[^\w.-]/g, '_')}.html`
   await $.fs.write(out, diffHtml(path, text.slice(0, 400_000), whole))
-  try {
-    await $.command.run({ command: 'preview', args: out })
-  } catch {
-    await $.process.run(['open', out]).catch(() => undefined)
-  }
+  await $.process.run(['open', out]).catch(() => undefined)
 }
 
 async function refreshContext($: Engine, pushPoint: boolean) {
@@ -146,7 +245,7 @@ async function togglePane($: Engine, term?: number): Promise<string> {
   return r.isPlaced ? 'deck open' : `deck waits: ${r.reason ?? 'no room'}`
 }
 
-const TAB_ARGS: Record<string, DeckTab> = { plan: 'plan', context: 'plan', changes: 'changes', files: 'changes', agents: 'agents' }
+const TAB_ARGS: Record<string, DeckTab> = { plan: 'plan', context: 'plan', changes: 'changes', files: 'changes', agents: 'agents', subagents: 'agents', global: 'global', sessions: 'global', all: 'global' }
 
 // The dock is shared by every pane in it, so a pane asks for its width again each time its tab comes to the
 // front: switching tabs moves the dock between widths. A width the person drags still wins until then.
@@ -177,6 +276,17 @@ export const register: Register = (on, options) => {
     })
     if (options.autoOpen !== false && e.isInteractive) void $.ui.open(openArgs())
     tmp = ((await $.env.get('TMPDIR')) || '/tmp').replace(/\/$/, '')
+    home = (await $.env.get('HOME')) ?? ''
+    const kept = await $.store.get('back').catch(() => undefined) as DeckBack | undefined
+    if (kept && typeof kept.sessionId === 'string' && kept.sessionId !== (await $.session.id().catch(() => ''))) await update($, back, () => kept)
+    termProgram = (await $.env.get('TERM_PROGRAM')) ?? ''
+    // the session list: every 15s while its tab is open, every minute otherwise (for the count on the tab)
+    void refreshSessions($)
+    let ticks = 0
+    $.clock.every(15000, () => {
+      ticks++
+      void read($, tab).then(t => { if (t === 'global' || ticks % 4 === 0) void refreshSessions($) })
+    })
     void refreshContext($, false)
     void refreshInfo($)
     return next(e)
@@ -185,9 +295,11 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'deck' }, async ($, e) => {
     const term = e.presentation.columns
     lastTerm = term
+    termCols = term
     const want = TAB_ARGS[e.args.trim().toLowerCase()]
     if (want) {
       await update($, tab, () => want)
+      if (want === 'global') void refreshSessions($)
       await $.ui.open(openArgs(term))
       return { text: `deck: ${want}` }
     }
@@ -345,20 +457,17 @@ export const register: Register = (on, options) => {
     const width = Math.max(24, body ?? e.viewport?.columns ?? 40)
     // Opened at session start the dock takes its default share; once the terminal's width is known
     // (or changes), ask once for our share of it. The viewport is the whole terminal when wider than the body.
-    const term = e.viewport?.columns
-    if (term && body && term > body + 4) termCols = term
-    if (term && body && term > body + 4 && term !== lastTerm) {
-      lastTerm = term
-      const want = Math.max(MIN_COLS, Math.round(term * share))
-      if (Math.abs(want - body) > 2) $.clock.after(0, () => { void $.ui.open(openArgs(term)) })
-    }
-    const [t, p, c, hist, a, u, f, ag, inf, fd, tn] = await Promise.all([read($, tab), read($, plan), read($, ctx), read($, history), read($, act), read($, usage), read($, files), read($, agents), read($, info), read($, feed), read($, turn)])
+    const [t, p, c, hist, a, u, f, ag, inf, fd, tn, ss, bk] = await Promise.all([read($, tab), read($, plan), read($, ctx), read($, history), read($, act), read($, usage), read($, files), read($, agents), read($, info), read($, feed), read($, turn), read($, sessions), read($, back)])
     return renderDeck(els, {
       tab: t, plan: p, ctx: c, history: hist, act: a, usage: u, files: f, agents: ag, info: inf, feed: fd, turn: tn,
       sleeping, blink: alarm && frame % 4 < 2,
       onFile: path => { void openDiff($, path) },
+      sessions: ss,
+      onSession: sess => { void openSession($, sess) },
+      back: bk,
+      onBack: () => { void goBack($) },
       now: Date.now(), width,
       pet: showPet && e.surface === 'terminal' ? petCells(sleeping ? 'sleep' : moodOf(a.kind), frame, 1) : undefined,
-    }, next => { void update($, tab, () => next) })
+    }, next => { void update($, tab, () => next); if (next === 'global') void refreshSessions($) })
   })
 }

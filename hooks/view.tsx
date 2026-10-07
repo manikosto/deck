@@ -1,4 +1,4 @@
-import type { DeckAct, DeckAgent, DeckCtx, DeckFeedItem, DeckFile, DeckHistory, DeckInfo, DeckPlanItem, DeckTab, DeckTurn, DeckUsage } from '../types'
+import type { DeckAct, DeckAgent, DeckBack, DeckCtx, DeckFeedItem, DeckFile, DeckHistory, DeckInfo, DeckPlanItem, DeckSession, DeckTab, DeckTurn, DeckUsage } from '../types'
 import { deltaBars, phrase } from './extras.ts'
 import { moodOf } from './pet.ts'
 import {
@@ -22,12 +22,19 @@ export type DeckView = {
   sleeping: boolean
   blink: boolean
   onFile: (path: string) => void
+  sessions: DeckSession[]
+  onSession: (s: DeckSession) => void
+  back: DeckBack | null
+  onBack: () => void
   now: number
   width: number
   pet?: { cells: string; columns: number; rows: number }
 }
 
-const TABS: [DeckTab, string][] = [['changes', 'Changes'], ['agents', 'Agents'], ['plan', 'Plan & context']]
+const TABS: [DeckTab, string][] = [['changes', 'Changes'], ['agents', 'Subagents'], ['plan', 'Plan & context'], ['global', 'All agents']]
+
+// background sessions that wait for the person: blocked on a question, or waiting
+const needsYou = (s: DeckSession) => s.state === 'blocked' || s.state === 'waiting'
 
 const clip = (s: string, n: number) => (n <= 1 ? '' : s.length > n ? s.slice(0, n - 1) + '…' : s)
 
@@ -185,7 +192,7 @@ function agentsSection(els: Els, agents: DeckAgent[], inner: number, now: number
 }
 
 function statusBox(els: Els, v: DeckView, inner: number) {
-  const { Box, Text, Raster } = els
+  const { Box, Text, Raster, Button } = els
   const life = hearts(v.usage.limits)
   const act = v.act
   const rows: any[] = []
@@ -216,6 +223,9 @@ function statusBox(els: Els, v: DeckView, inner: number) {
     )
   }
   if (v.usage.costUsd !== undefined && v.usage.costUsd > 0) rows.push(<Text key="cost" color={COLORS.dim}>{`$${v.usage.costUsd.toFixed(2)} this session${life ? ' (API-equivalent)' : ''}`}</Text>)
+  if (v.back) rows.push(<Box key="back" flexDirection="row" columnGap={1}><Button key="status-back" plain label="← back" onPress={v.onBack} /><Text color={COLORS.dim}>{`to the ${v.back.name}`}</Text></Box>)
+  const waiting = v.sessions.filter(needsYou).length
+  if (waiting) rows.push(<Text key="waiting" color={COLORS.warn} wrap="truncate">{`⚑ ${waiting} agent${waiting === 1 ? '' : 's'} need you · All agents tab`}</Text>)
   const running = v.agents.filter(a => a.status === 'running').length
   if (running) rows.push(<Text key="ag" color={ACT_COLOR.agent}>{`◆ ${running} subagent${running === 1 ? '' : 's'} running`}</Text>)
   if (v.pet && Raster) {
@@ -250,18 +260,70 @@ function feedSection(els: Els, feed: DeckFeedItem[], inner: number, now: number)
   return Section(els, 'feed', 'RECENT', '', inner, rows)
 }
 
+// Every Claude Code background session, grouped by what it needs from you; a click opens it.
+function globalSection(els: Els, list: DeckSession[], inner: number, now: number, onSession: (s: DeckSession) => void, backTo: DeckBack | null, onBack: () => void) {
+  const { Box, Text, Button } = els
+  const groups: [string, string, string, DeckSession[]][] = [
+    ['⚑', 'NEEDS INPUT', COLORS.warn, list.filter(needsYou)],
+    ['⟳', 'WORKING', ACT_COLOR.agent, list.filter(s => s.state === 'working' || s.state === 'busy' || s.state === 'running')],
+    ['✓', 'DONE', COLORS.good, list.filter(s => s.state === 'done' || s.state === 'idle' || s.state === 'completed')],
+  ]
+  const shownIds = new Set(groups.flatMap(g => g[3].map(s => s.id)))
+  const rest = list.filter(s => !shownIds.has(s.id))
+  if (rest.length) groups.push(['·', 'OTHER', COLORS.dim, rest])
+  if (!list.length) {
+    return Section(els, 'global', 'ALL AGENTS', '', inner, [
+      <Text key="none" color={COLORS.faint} wrap="wrap">No background sessions. Start one with `claude --bg` or from the agent view (← in the prompt footer).</Text>,
+    ])
+  }
+  const out: any[] = []
+  if (backTo) {
+    out.push(
+      <Box key="back" flexDirection="row" columnGap={1} marginTop={1}>
+        <Button key="go-back" label="← back" variant="primary" onPress={onBack} />
+        <Text color={COLORS.dim}>{`to the ${backTo.name}`}</Text>
+      </Box>,
+    )
+  }
+  for (const [icon, title, color, items] of groups) {
+    if (!items.length) continue
+    const rows: any[] = items.slice(0, title === 'DONE' ? 6 : 12).map(s => {
+      const project = s.cwd.split('/').filter(Boolean).slice(-1)[0] ?? ''
+      return (
+        <Box key={'s' + s.id} flexDirection="column" width={inner}>
+          <Box flexDirection="row" justifyContent="space-between" width={inner}>
+            <Box flexDirection="row">
+              <Text color={color}>{icon + ' '}</Text>
+              <Button key={'open-' + s.id} plain label={clip(s.name, inner - 12)} onPress={() => onSession(s)} />
+            </Box>
+            <Text color={COLORS.faint}>{`${s.live ? '↗' : '↪'} ${ago(now - s.at)}`}</Text>
+          </Box>
+          {s.needs || project ? (
+            <Text color={COLORS.dim} wrap="truncate">{'  ' + clip([s.needs, project && `· ${project}`].filter(Boolean).join(' '), inner - 2)}</Text>
+          ) : null}
+        </Box>
+      )
+    })
+    if (items.length > rows.length) rows.push(<Text key={'more' + title} color={COLORS.faint}>{`  +${items.length - rows.length} more`}</Text>)
+    out.push(Section(els, 'g' + title, `${icon} ${title}`, String(items.length), inner, rows))
+  }
+  out.push(<Text key="ghint" color={COLORS.faint} wrap="truncate">↪ opens here, ← back returns · ↗ runs elsewhere: opens in a new window</Text>)
+  return out
+}
+
 export function renderDeck(els: Els, v: DeckView, onTab: (t: DeckTab) => void) {
   const { Box, Button } = els
   const inner = Math.max(10, v.width - 4)
   const body =
     v.tab === 'plan' ? [planSection(els, v.plan, inner), contextSection(els, v.ctx, v.history, inner)]
     : v.tab === 'agents' ? [agentsSection(els, v.agents, inner, v.now)]
+    : v.tab === 'global' ? globalSection(els, v.sessions, inner, v.now, v.onSession, v.back, v.onBack)
     : [changesSection(els, v.files, inner, v.now, v.onFile)]
   return (
     <Box flexDirection="column" width={v.width}>
       <Box key="tabs" flexDirection="row" gap={1}>
         {TABS.map(([id, label], i) => (
-          <Button key={'tab-' + id} label={label} hotkey={String(i + 1)} variant={v.tab === id ? 'primary' : undefined} dimColor={v.tab !== id} onPress={() => onTab(id)} />
+          <Button key={'tab-' + id} label={id === 'global' && v.sessions.some(needsYou) ? `${label} ⚑${v.sessions.filter(needsYou).length}` : label} hotkey={String(i + 1)} variant={v.tab === id ? 'primary' : undefined} dimColor={v.tab !== id} onPress={() => onTab(id)} />
         ))}
       </Box>
       {body}
